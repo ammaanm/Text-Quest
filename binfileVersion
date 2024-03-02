@@ -152,7 +152,7 @@ RUNNING = True
 
 token = ""
 while blake2b(str(abs(int(blake2b(token.encode()).hexdigest(), 16))) \
-    .encode()).hexdigest()[0:32] != "18dd873cfe749ff6228208372a2f07cd":
+    .encode()).hexdigest()[0:32] != "$TOKENVERIFY":
     #print("Type Password")
     hash1 = int(str(int(blake2b(input("Input Password: ").lower().encode()).hexdigest(), 16))[0:8])
     hash2 = int(str(sha256(((str(hash1)*8).encode())[1:5:2]).hexdigest())[8:16], 16)
