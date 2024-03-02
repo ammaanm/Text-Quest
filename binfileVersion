@@ -1,0 +1,925 @@
+# region Imports
+
+import sys
+import itertools
+import importlib.util
+from typing import Any, Literal, Mapping
+import logging
+import sched
+import tkinter as tk
+import threading
+import json
+from hashlib import blake2b, sha256
+from time import sleep, time_ns
+from random import randint, choice
+
+if not importlib.util.find_spec(name="telebot"):
+    import subprocess
+    for i in range(10):
+        if subprocess.run(args=[sys.executable, "-m", "pip", "install", "telebot"]).returncode: 
+            subprocess.run(args=[sys.executable, "-m", "ensurepip"])
+        else:
+            break
+        if not subprocess.run(args=[sys.executable, "-m", "pip", "install", "telebot"]).returncode:
+            break
+    else:
+        raise ModuleNotFoundError("Can not import or install telebot package")
+
+if not importlib.util.find_spec(name="aiohttp"):
+    import subprocess
+    for i in range(10):
+        if not subprocess.run(args=[sys.executable, "-m", "pip", "install", "aiohttp"]).returncode:
+            break
+        else:
+            raise ModuleNotFoundError("Can not import or install aiohttp package")
+#TODO Add Async
+import telebot as tb
+
+# print(set(tb.__dict__.keys()).difference(telebot.__dict__.keys()))
+
+from telebot import formatting as form
+
+# endregion
+
+# region Set Up Loggining
+
+logging.addLevelName(11, "SERVER EVENT")
+logging.addLevelName(12, "USER EVENT")
+
+logging.addLevelName(21, "SERVER ACTION")
+logging.addLevelName(22, "USER ACTION")
+
+logger = logging.Logger("Text-Quest Bot", 1)
+
+
+defhand = logging.StreamHandler()
+defhand.formatter = logging.Formatter(
+    "%(asctime)s [%(name)s/%(levelname)s]: %(message)s", "%m.%d %H:%M:%S")
+logger.addHandler(defhand)
+
+
+def addHandler(level: int, fmt: str = None, timefmt: str = None, style: Literal["%", "{", "$"] = "%", defaults: Mapping[str, Any] = {}):
+    deffil = logging.Filter().filter = lambda record: record.levelno != level
+    defhand.addFilter(deffil)
+    hand = logging.StreamHandler()
+    hand.setLevel(level)
+    hand.formatter = logging.Formatter(fmt, timefmt, style,  defaults=defaults)
+    fil = logging.Filter().filter = lambda record: record.levelno == level
+    hand.addFilter(fil)
+    logger.addHandler(hand)
+
+
+addHandler(12, "%(asctime)s [%(name)s/%(levelname)s]: <%(user)s> \n%(message)s",
+           "%m.%d %H:%M:%S",  defaults={"user": "� "})
+addHandler(22, "%(asctime)s [%(name)s/%(levelname)s]: <%(user)s> %(message)s",
+           "%m.%d %H:%M:%S",  defaults={"user": "� "})
+addHandler(
+    11, "%(asctime)s [%(name)s/%(levelname)s]: %(message)s", "%m.%d %H:%M:%S")
+addHandler(
+    21, "%(asctime)s [%(name)s/%(levelname)s]: \n%(message)s", "%m.%d %H:%M:%S")
+
+log = logger.log
+
+# endregion
+
+with open("pashaGameConfig.json") as f:
+    config = json.load(f)
+
+# region Define Constants
+
+#TODO Make more types of people like: Old Miner, Shopkeeper, Police man???, ...  
+PEOPLE = ("doctor", "witch")
+#TODO Make more locations like: Mine, Market, Item(if you pick it up somewhat (like police man is catching you) is happening), ...
+EVENTS = {
+    "wild nature": ("well", "well", "witch hut", "witch hut", "witch hut", "hospital", "human", "human"),
+    "village": ("well", "well", "human", "human", "human", "hospital", "mine")
+    }
+ANSWERS_PROMPT = {
+    "well": "\n\nDo you want to drink water from it?",
+    "witch hut": "\n\nWere is potion, do you want to drink it?",
+    "hospital": "\n\nDo you want to go inside and heal but pay 100 coins?",
+    "mine": "\n\nDo you want to go in",
+    "witch": "\n\nDo you want to take it?\nDo you want to rob her?",
+    "doctor": "\n\nDo you want to get treatment?\nDo you want to rob him?",
+}
+
+ANSWERS_KB = {
+    "well": tb.util.quick_markup({"Pass by": {"callback_data": "Pass by"}, "Drink": {"callback_data": "Drink"}}),
+    "witch hut": tb.util.quick_markup({"Pass by": {"callback_data": "Pass by"}, "Drink": {"callback_data": "Drink"}}),
+    "hospital": tb.util.quick_markup({"Pass by": {"callback_data": "Pass by"}, "Get treatment": {"callback_data": "Get treatment"}}),
+    "witch": tb.util.quick_markup({"Get around": {"callback_data": "Get around"}, "Take ": {"callback_data": "Take"}, "Rob": {"callback_data": "Rob"}}),
+    "doctor": tb.util.quick_markup({"Get around": {"callback_data": "Get around"}, "Get treatment ": {"callback_data": "Get treatment"}, "Rob": {"callback_data": "Rob"}}), }
+
+IN_FRONT_PHRASES = ("in front of you is ", "you see ", "near you is ")
+GO_PHRASES = ("You are strolling by the road and ", "You are walking along the road and ",
+              "You are strolling by the street and ", "You are walking along the road and ")
+HOSPITAL_HEAL_PHRASES = ("Now you are feeling a lot better!",
+                         "Now you are full of strength and health!")
+HOSPITAL_NO_MONEY_PHRASES = ("You do not have so much money. :(",
+                             "You're Not rich enough.", "You do not have so much money.", "You are too poor.")
+YOU_PASSED_PHRASES = ("You missed the turn and continued walking forward.",
+                      "You didn't pay attention to the road and didn't turn.", "You didn't pay attention to the street and didn't turn.")
+YOU_KEPT_GOING_PHRASES = ("You're back on the road.",
+                          "You are back on the street.")
+GOT_SICK_PHRASES = ("You got sick.", "You are now feeling really bad.")
+POISON_PHRASES = ("You feel like you dying",
+                  "You're feeling poisoned", "You're feeling poisoned")
+HUNGER_PHRASES = ("You are hungry", "You want to eat more and more every second",
+                  "You're feeling like you will starve to death in 2 or 3 hours")
+ROAD_PHRASES = ("You are walking to the next destination, do you want to check your stats",
+                "You are resting from the walk, do you want to check your stats)")
+YOU_SLEPT_PHRASES = ("You slept!", "You are now not tired... finally!",
+                     "You are now a lot more adequate!")
+BYE_PHRASES = ("Bye ", "Good bye ", "Bye bye ")
+ANGRY_WITCH_PHRASES = ("angry witch! She says that she saw how you taking her potions, but was too slow to stop you...\nBut now you will pay for it!",
+                       "angry witch. And she immediately starts to attack you!")
+KIND_WITCH_PHRASES = ("witch. She says that you are pretty cute and she offers you a potion!",
+                      "witch. She says that she saw the guy that stole her a lot of potions. She asks you a question, did you see him. You say no. She becomes a bit more sad, but offers you a potion with the words if you see him, tell me where is he.")
+DOCTOR_PHRASES = ("doctor. He offers you treatment for only 99 coins.", 
+                  f"doctor. He says that he can heal you for {form.hstrikethrough('just under 100 coins')} 99 coins.")
+FIGHT_PHRASES = ("This was a great battle, but you survived!",
+                 "This was a great battle, but you won!", "Were was a fight, but you won!")
+
+ACHIVEMENTS = ("Why is in still spawning???",
+               "There is no smoke without fire.")
+ITEMS = ("Mysterious Potion", "Apple")
+
+RUNNING = True 
+
+# endregion
+
+#region Get token
+
+token = ""
+while blake2b(str(abs(int(blake2b(token.encode()).hexdigest(), 16))) \
+    .encode()).hexdigest()[0:32] != "18dd873cfe749ff6228208372a2f07cd":
+    #print("Type Password")
+    hash1 = int(str(int(blake2b(input("Input Password: ").lower().encode()).hexdigest(), 16))[0:8])
+    hash2 = int(str(sha256(((str(hash1)*8).encode())[1:5:2]).hexdigest())[8:16], 16)
+    password = round(abs(hash1 - hash2) / 2)
+    print(password)
+    token = "".join(chr(ord(i[1]) + int((str(password)*56)[i[0]])) for i in enumerate(""))
+    print(token)
+
+# sleep(0.33)
+
+for _ in range(3):
+    sys.stdout.write("\x1b[1A")  # cursor up one line
+    sys.stdout.write("\x1b[2K")  # delete the last line
+
+print("Password seems correct")
+
+#endregion
+
+bot = tb.TeleBot(token, parse_mode='HTML')
+log(21, "Loged in")
+
+# region Create Classes
+
+#region Inventory
+
+class Inventory:
+    #region Item class
+    
+    class Item:
+        """Data is 5 bytes\n
+        ---
+        id:7bits, count:4bits, stats_modifyers:24bits, super_powers:5bits\n
+        ---
+        id: 1111111000000000000000000000000000000000
+        count: 111100000000000000000000000000000
+        stats_modifiers: 11111111111111111111111100000
+        super_powers: 11111
+
+        0b 0000000111122222222222222222222222233333
+        """
+        
+        def __init__(self, data:int = 0) -> None:
+            self.data: int = data
+        data = 0
+
+        def setid(self, item_id: int):
+            """Sets id for the item
+
+            Parameters
+            ----------
+            item_id : int
+                Id of new item
+                Max 2 ** 7
+            """
+            self.data -= self.data & 0b1111111000000000000000000000000000000000
+            self.data += item_id * 0b1000000000000000000000000000000000
+
+        def setcount(self, item_count: int):
+            """Sets count for the item
+
+            Parameters
+            ----------
+            item_count : int
+                Count of item
+                Max 16
+            """
+            if item_count == 0:
+                self.data = 0
+            self.data -= self.data & 0b111100000000000000000000000000000
+            self.data += (item_count - 1) * 0b100000000000000000000000000000
+
+        def setmodifier(self, modifier_id: int, modifier: int):
+            """Sets item modifier with item modifier id to modifier
+
+            Parameters
+            ----------
+            modifier_id : int
+                Id of modifier slot of item; Starts from 0
+                Max 3
+            modifier : int
+                Modifier value
+                Max 63
+            """
+            self.data -= self.data & 2 ** (modifier_id *
+                                           7 + 6) - 2 ** (modifier_id * 7)
+            self.data += modifier * 2**(modifier_id*7) * 0b100000
+
+        def setpower(self, power_id, state):
+            """Sets item super power with item modifier id to state
+
+            Parameters
+            ----------
+            power_id : int
+                Id of power slot of item; Starts from 0
+                Max 4
+            state : bool
+                Modifier value
+            """
+            self.data -= self.data & 2 ** (power_id + 1) - 2 ** (power_id)
+            self.data += state * 2**power_id
+            
+        def set(self, item_id:int, item_count:int, modifiers:dict[int] = None, powers:dict[int, int] = None):
+            if type(self) == type:
+                self.__init__()
+            self.setid(item_id)
+            self.setcount(item_count)
+            [*map(self.setmodifier, modifiers.keys(), modifiers.values())]
+            [*map(self.setpower, powers.keys(), powers.values())]
+            return self
+
+        def getid(self):
+            """Gets id for the item
+
+            Returns
+            -------
+            item_id : int
+                Id of new item
+                Max 2 ** 7
+            """
+            return self.data & 0b1111111000000000000000000000000000000000
+
+        def getcount(self):
+            """Gets count for the item
+
+            Returns
+            -------
+            item_count : int
+                Count of item
+                Max 16
+            """
+            return self.data & 0b111100000000000000000000000000000
+
+        def getmodifier(self, modifier_id: int):
+            """Gets item modifier with item modifier id to modifier
+
+            Parameters
+            ----------
+            modifier_id : int
+                Id of modifier slot of item; Starts from 0
+                Max 3
+                
+            Returns
+            -------
+            modifier : int
+                Modifier value
+                Max 63
+            """
+            return self.data & 2 ** (modifier_id *
+                                           7 + 6) - 2 ** (modifier_id * 7)
+
+        def getpower(self, power_id):
+            """Gets item super power with item modifier id to state
+
+            Parameters
+            ----------
+            power_id : int
+                Id of power slot of item; Starts from 0
+                Max 4
+            
+            Returns
+            -------
+            
+            state : bool
+                Modifier value
+            """
+            return self.data & 2 ** (power_id + 1) - 2 ** (power_id)
+           
+        #TODO Item keyboards
+        def answer_kb(self, answer:str):
+            pass
+            
+        def to_kb(self):
+            pass
+
+        def __str__(self) -> str:
+            if self.data == 0:
+                return ""
+            string = f"{self.data & 0b111100000000000000000000000000000}x "  # count
+            # item name
+            string += f" {ITEMS[self.data & 0b1111111000000000000000000000000000000000]}"
+            # modifiers
+            mod = self.data & 63
+            string += f"Max health {'+' if mod > 31 else ''}\
+                {round((mod-32)/64*100)}%" if mod != 32 else ''
+            mod = self.data & 8064
+            string += f"Hunger {'+' if mod > 31 else ''}\
+                {round((mod-32)/64*100)}%" if mod != 32 else ''
+            mod = self.data & 1032192
+            string += f"Mental health {'+' if mod > 31 else ''}\
+                {round((mod-32)/64*100)}%" if mod != 32 else ''
+            mod = self.data & 132120576
+            string += f"Coins multiplier {'+' if mod > 31 else ''}\
+                {round((mod-32)/32*100)}%" if mod != 32 else ''
+            return string
+    
+    #endregion
+
+    #region Other
+    
+    def __init__(self) -> None:
+        Item = self.Item
+        self.slots = (Item(), Item(), Item(), Item(), Item(), Item(), Item(), Item())
+
+    def add(self, id, count, modifyers, powers)-> bool: 
+        for item in self.slots:
+            if item.data == 0:
+                item.set(id, count, modifyers, powers)
+                return True
+        return False
+    def remove(self, id, count = None, modifyers = None, powers = None) -> bool: 
+        data = self.Item.set(self.Item, id, count, modifyers, powers).data
+        for i in self.slots:
+            if i.data == data:
+                i.data = data
+                return True
+        return False
+        
+    
+    @property
+    def kb(self):
+        return tb.util.quick_markup({
+            str(self.slots[0]): {'callback_data': "itemSlot0"},
+            str(self.slots[1]): {'callback_data': "itemSlot1"},
+            str(self.slots[2]): {'callback_data': "itemSlot2"},
+            str(self.slots[3]): {'callback_data': "itemSlot3"},
+            str(self.slots[4]): {'callback_data': "itemSlot4"},
+            str(self.slots[5]): {'callback_data': "itemSlot5"},
+            str(self.slots[6]): {'callback_data': "itemSlot6"},
+            str(self.slots[7]): {'callback_data': "itemSlot7"},
+            'Back': {'callback_data': "Back"}
+        }, row_width=1)
+
+    def from_bytearray(self, data) -> None:
+        self.slots = tuple(self.Item(int.from_bytes(i, "big")) for i in itertools.batched(data, 5))
+    #FIXME
+    def to_bytearray(self) -> bytearray: 
+        # return bytearray(1)
+        print(*map(lambda a: a.data.to_bytes(8,"big"), self.slots))
+        data = b''
+        for item in self.slots:
+            data += item.data.to_bytes(8,"big")
+        return bytearray(data)
+    #endregion
+    
+#endregion
+#region Game
+
+class StartGame:
+    #region Setup
+    
+    def __init__(self, msg: tb.types.Message | tuple[bytearray] == None) -> None:
+        self.max_health = 100
+        self.health = 100
+        self.max_hunger = 100
+        self.hunger = 100
+        self.max_mental_health = 100
+        self.mental_health = 100
+        self.coins_multiplier = 1
+        self.coins = 125
+        self.effects = {}
+        self.inventory = Inventory()
+        self.total_steps = 0
+        self.last_event = None
+        self.last_super_event = "wild nature"
+        self.streak = 0
+        self.user_id = 0
+        self.achivements = 0
+        self.dead = False
+        self.last_time = 0
+        if msg != None:
+            if type(msg) == tb.types.Message:
+                bot.send_message(
+                    msg.chat.id, "Welcome to text game named «Text Quest»! " + form.hspoiler("(in beta)"))
+                sched1 = sched.scheduler()
+                sched1.enter(0.75, 2, self.go, [msg.chat])
+                sched1.run()
+                self.user_id = msg.from_user.id
+            elif type(msg) == tuple:
+                self.from_bytearray(*msg)
+    
+    #endregion
+
+    #region Other
+    
+    def achivement(self, chat: tb.types.Message, name: str):
+        assert "too many achivements!", len(ACHIVEMENTS) > 31
+        if self.achivements & 2**ACHIVEMENTS.index(name):
+            self.achivements += 2 ** ACHIVEMENTS.index(name)  # max 31
+            bot.pin_chat_message(chat.id, bot.send_message(
+                chat.id, f"<{self.user_id.full_name}>\nAchivement made" + form.hunderline(name)))
+
+    #TODO Make superlocations work
+    def to_bytearray(self):
+        effects = []
+        for key in self.effects.keys():
+            effects.append(("poison", "hunger", "regeneration",
+                           "saturation", "stole_from_witch").index(key))
+            effects.append(self.effects[key])
+        return (bytearray([self.health, self.hunger, self.mental_health,
+                (None, *(set(j for i in EVENTS.values() for j in i) | set(PEOPLE))).index(
+                    self.last_event), (None,*EVENTS.keys()).index(
+                    self.last_super_event), self.streak if self.streak < 12 else 12, int(self.dead)
+        ]), bytearray(effects),
+            self.inventory.to_bytearray(),
+            bytearray([*self.user_id.to_bytes(8), *self.coins.to_bytes(8),
+                       *self.total_steps.to_bytes(12), *self.achivements.to_bytes(4)]))
+
+    def from_bytearray(self, atributes, effects, inventory, args):
+        for i in range(0, len(effects) - 1, 2):
+            self.effects[("poison", "hunger", "regeneration", "saturation",
+                          "stole_from_witch")[effects[i]]] = effects[i+1]
+        self.health = atributes[0]
+        self.hunger = atributes[1]
+        self.mental_health = atributes[2]
+        self.last_event = (None, *(set(j for i in EVENTS.values() for j in i) | set(PEOPLE)))[atributes[3]]
+        self.last_super_event = EVENTS.keys(atributes[4])
+        self.streak = atributes[5]
+        self.dead = bool(atributes[6])
+        self.inventory.from_bytearray(inventory),
+        self.user_id = int.from_bytes(args[0:8], "big")
+        self.coins = int.from_bytes(args[8:16], "big")
+        self.total_steps = int.from_bytes(args[16:28], "big")
+        self.achivements = int.from_bytes(args[28:32], "big")
+        self.last_time = 0
+        log(12, "created from bytes", atributes, effects,
+            inventory, args, extra={"user": bot.edit})
+        return self
+
+    def reset_stats(self):
+        self.health = 100
+        self.hunger = 100
+        self.mental_health = 100
+        self.coins = 125
+        self.effects = {}
+        self.inventory = Inventory()
+        self.total_steps = 0
+        self.last_event = None
+        self.streak = 0
+
+        self.go()
+
+    def process_stats(self, chat):
+        if "poison" in self.effects:
+            bot.send_message(chat.id, choice(POISON_PHRASES))
+            self.health -= randint(1, 15)
+            self.effects["poison"] -= 1
+            if self.effects["poison"] < 1:
+                self.effects.pop("poison")
+        if "hunger" in self.effects:
+            bot.send_message(chat.id, choice(HUNGER_PHRASES))
+            self.hunger -= randint(5, 20)
+            self.effects["hunger"] -= 1
+            if self.effects["hunger"] < 1:
+                self.effects.pop("hunger")
+        if "saturation" in self.effects:
+            self.hunger += randint(3, 17)
+            self.effects["saturation"] -= 1
+            if self.effects["saturation"] < 1:
+                self.effects.pop("saturation")
+        if "regeneration" in self.effects:
+            self.health += randint(1, 12)
+            self.effects["regeneration"] -= 1
+            if self.effects["regeneration"] < 1:
+                self.effects.pop("regeneration")
+        if self.hunger < 1:
+            self.health -= randint(40, 75)
+            self.hunger = 0
+        if self.mental_health < 1:
+            self.health -= randint(50, 60)
+            self.hunger -= randint(40, 75)
+            self.mental_health = 0
+        if self.health < 1:
+            self.dead = True
+            self.health = 0
+
+        if self.health > 100:
+            self.health = 100
+        if self.mental_health > 100:
+            self.mental_health = 100
+        if self.hunger > 100:
+            self.hunger = 100
+    
+    #endregion
+
+    #region New Place
+    
+    def go(self, chat: tb.types.Chat, on_dest=False):
+        time = time_ns()
+        if 1_000_000_000 > time - self.last_time:
+            self.last_time = time
+            sch = sched.scheduler()
+            sch.enter(1, 1, bot.delete_message, (chat.id, bot.send_message(
+                chat.id, "Too fast, slow down!\ntype /start to continue")))
+            sch.run()
+            return None
+        self.last_time = time
+
+        if on_dest and not self.dead:
+            self.mental_health -= randint(1, 10)
+            if randint(0, 10) == 0:
+                llse = self.last_super_event
+                while self.last_super_event == llse:
+                    self.last_super_event = choice(tuple(EVENTS.keys()))
+                if self.last_super_event == "wild nature":
+                    bot.send_message(chat.id, f"You are exited {llse}")
+                else:
+                    bot.send_message(chat.id, f"You entered {self.last_super_event}")
+            event = choice(EVENTS[self.last_super_event])
+            if event == "human":
+                self.human(chat)
+            else:
+                to_send = choice(GO_PHRASES) + choice(IN_FRONT_PHRASES) + event
+                if event == self.last_event:
+                    self.streak += 1
+                else:
+                    self.streak = 0
+                match self.streak:
+                    case 0: to_send += "."
+                    case 1: to_send += "... again."
+                    case 2: to_send += "... again?"
+                    case 3: to_send += "... again?!"
+                    case 4: to_send += "... again???"
+                    case 5: to_send += "... what are the chances???"
+                    case 6: to_send += "... why?"
+                if self.streak > 6:
+                    # if "Why is in still spawning???" not in self.achivements:
+                    self.achivement(chat, "Why is in still spawning???")
+                    bot.send.message(chat.id, "Why is in still spawning???")
+                to_send += ANSWERS_PROMPT[event]
+                self.last_event = event
+                self.total_steps += 1
+                bot.send_message(chat.id, to_send,
+                                 reply_markup=ANSWERS_KB[event]).message_id
+                self.process_stats(chat)
+        else:
+            if not self.dead:
+                to_send = choice(ROAD_PHRASES)
+                event = "road"
+                bot.send_message(chat.id, to_send, parse_mode=None,
+                                 reply_markup=tb.util.quick_markup({"Check stats": {"callback_data": "Check stats"},
+                                                                    "Rest": {"callback_data": "Rest"},
+                                                                    "Keep Going": {"callback_data": "Keep Going"}})
+                                 ).message_id
+            else:
+                bot.send_message(chat.id, "You're dead!" + ("\n:(" if randint(0, 24) == 0 else ""), parse_mode=None,
+                                 reply_markup=tb.util.quick_markup({"Check stats": {"callback_data": "Check stats"},
+                                                                    "New game": {"callback_data": "New game"}})
+                                 ).message_id
+        bot.callback_query_handler(lambda query: self.user_id)(self.on_click)
+        # bot.register_callback_query_handler(self.on_click, lambda query: query.message.message_id == msg_id)
+
+    def human(self, chat: tb.types.Chat):
+        self.last_event = choice(PEOPLE)
+        match self.last_event:
+            case "witch":
+                if "stole_from_witch" in self.effects:
+                    if randint(0, 24) > 0:
+                        self.effects.pop("stole_from_witch")
+                    potion = choice(("poison", "hunger"))
+                    if potion in self.effects:
+                        self.effects[potion] += randint(2, 3)
+                    else:
+                        self.effects[potion] = randint(2, 3)
+                    to_send = choice(GO_PHRASES) + choice(IN_FRONT_PHRASES) + \
+                        choice(ANGRY_WITCH_PHRASES) + choice(FIGHT_PHRASES)
+                    self.health -= randint(1, 50)
+                    kb = None
+                else:
+                    to_send = choice(GO_PHRASES) + choice(IN_FRONT_PHRASES) + \
+                        choice(KIND_WITCH_PHRASES) + ANSWERS_PROMPT["witch"]
+                    kb = ANSWERS_KB["witch"]
+            case "doctor":
+                to_send = choice(GO_PHRASES) + choice(IN_FRONT_PHRASES) + \
+                    choice(DOCTOR_PHRASES) + ANSWERS_PROMPT["doctor"]
+                kb = ANSWERS_KB["doctor"]
+        return bot.send_message(chat.id, to_send, reply_markup=kb)
+    
+    #endregion
+
+    #region Answer CallbackQuery
+    
+    def on_click(self, query: tb.types.CallbackQuery):
+        if query.data != "Null":
+            # if query.message.message_id == self.last_msg_id:
+            log(12, "Button %s click at %s; last event: %s",
+                query.data, query.message.chat.id, self.last_event)
+            data = query.data
+            if data == "93":
+                bot.delete_message(query.message.chat.id,
+                                   query.message.message_id)
+                self.go(query.message.chat)
+            elif data == "Pass by":
+                bot.send_message(query.message.chat.id,
+                                 choice(YOU_PASSED_PHRASES))
+                self.go(query.message.chat)
+                bot.edit_message_reply_markup(query.message.chat.id, query.message.id, reply_markup=tb.util.quick_markup(
+                    {query.data: {"callback_data": "Null"}}))
+
+                self.go(query.message.chat)
+            elif data == "Get around":
+                bot.send_message(query.message.chat.id, choice(
+                    BYE_PHRASES) + self.last_event)
+                self.go(query.message.chat)
+            elif data == "Back":
+                self.go(query.message.chat)
+            elif data == "Check stats":
+                bot.edit_message_text(f"Stats:\n\n>Health: {self.health}%\n>Hunger: {self.hunger}%\n>Mental health: {self.mental_health}%\n>Money: {self.coins} coins",
+                                      query.message.chat.id, query.message.message_id, reply_markup=tb.util.quick_markup({"Back": {"callback_data": "Back"}}))
+            elif data == "Rest":
+                bot.send_message(query.message.chat.id,
+                                 choice(YOU_SLEPT_PHRASES))
+                self.mental_health += randint(12, 18)
+                self.health += randint(3, 10)
+                self.hunger -= randint(8, 12)
+                bot.edit_message_text(choice(YOU_SLEPT_PHRASES),
+                                      query.message.chat.id, query.message.message_id, reply_markup=tb.util.quick_markup({"Back": {"callback_data": "Back"}}))
+                self.process_stats(query.message.chat)
+            elif data == "Keep Going":
+                self.go(query.message.chat, True)
+                bot.edit_message_reply_markup(query.message.chat.id, query.message.id, reply_markup=tb.util.quick_markup(
+                    {j.text: {"callback_data": "Null"} for i in query.message.reply_markup.keyboard for j in i}))
+            elif data == "New game":
+                bot.send_message(query.message.chat.id, "Are you sure?", parse_mode=None,
+                                 reply_markup=tb.util.quick_markup({"No": {"callback_data": 102},
+                                                                    "Yes": {"callback_data": "Yes"}})).message_id
+                # bot.register_callback_query_handler(self.on_click, lambda query: query.message.message_id == msg_id)
+            elif data == "Yes":
+                self.reset_stats()
+            elif data == "102":
+                bot.delete_message(query.message.chat.id,
+                                   query.message.message_id)
+            else:
+                can_continue = True
+                match self.last_event:
+                    case "hospital":
+                        if data == "Get treatment":
+                            if self.coins > 99:
+                                bot.send_message(
+                                    query.message.chat.id, choice(HOSPITAL_HEAL_PHRASES))
+                                self.mental_health += randint(40, 60)
+                                self.health += randint(40, 60)
+                                if "poison" in self.effects:
+                                    self.effects.pop("poison")
+                                if "hunger" in self.effects:
+                                    self.effects.pop("hunger")
+                                self.coins -= 100
+                            else:
+                                bot.send_message(query.message.chat.id, choice(
+                                    HOSPITAL_NO_MONEY_PHRASES))
+                                can_continue = False
+                    case "well":
+                        if data == "Drink":
+                            if randint(0, 2) > 0:
+                                self.achivement(
+                                    query.message.chat, "There is no smoke without fire.")
+                                bot.send_message(
+                                    query.message.chat.id, choice(GOT_SICK_PHRASES))
+                                if "poison" in self.effects:
+                                    self.effects["poison"] += randint(3, 5)
+                                else:
+                                    self.effects["poison"] = randint(3, 5)
+                                self.mental_health -= randint(3, 6)
+                            else:
+                                bot.send_message(
+                                    query.message.chat.id, choice(HOSPITAL_HEAL_PHRASES))
+                                self.health += randint(5, 10)
+                    case "witch hut":
+                        if data == "Drink":
+                            potion = choice(
+                                ("poison", "hunger", "saturation", "regeneration"))
+                            bot.send_message(
+                                query.message.chat.id, f"It was a potion of {potion}")
+                            if potion in self.effects:
+                                self.effects[potion] += randint(6, 10)//10
+                            else:
+                                self.effects[potion] = randint(6, 10)//10
+                            if randint(0, 10) > 0:
+                                self.effects["stole_from_witch"] = 1
+                        elif data == "Take":
+                            can_continue = self.inventory.add()
+                    case "witch":
+                        if data == "Take":
+                            potion = choice(
+                                ("hunger", "saturation", "regeneration"))
+                            bot.send_message(
+                                query.message.chat.id, f"It was a potion of {potion}")
+                            if potion in self.effects:
+                                self.effects[potion] += randint(6, 10)//10
+                            else:
+                                self.effects[potion] = randint(6, 10)//10
+                        elif data == "Rob":
+                            self.coins += randint(40, 60)
+                            self.health -= randint(5, 50)
+                            self.mental_health -= randint(1, 8)
+                            bot.send_message(
+                                query.message.chat.id, choice(FIGHT_PHRASES))
+                            if randint(0, 3):
+                                potion = choice(("hunger", "hunger", "hunger", "poison",
+                                                "poison", "poison", "poison", "saturation", "regeneration"))
+                                bot.send_message(query.message.chat.id, f"She thrown the potion of {potion} at you!")
+                                if potion in self.effects:
+                                    self.effects[potion] += randint(6, 10)//10
+                                else:
+                                    self.effects[potion] = randint(6, 10)//10
+                    case "doctor":
+                        if data == "Get treatment":
+                            if self.coins > 98:
+                                bot.send_message(
+                                    query.message.chat.id, choice(HOSPITAL_HEAL_PHRASES))
+                                self.mental_health += randint(35, 56)
+                                self.health += randint(35, 50)
+                                if "poison" in self.effects and randint(0, 5):
+                                    self.effects.pop("poison")
+                                if "hunger" in self.effects and randint(0, 5):
+                                    self.effects.pop("hunger")
+                                self.coins -= 99
+                            else:
+                                bot.send_message(query.message.chat.id, choice(
+                                    HOSPITAL_NO_MONEY_PHRASES))
+                        elif data == "Rob":
+                            self.coins += randint(100, 180)
+                            self.health -= randint(10, 60)
+                            self.mental_health -= randint(2, 16)
+                            bot.send_message(
+                                query.message.chat.id, choice(FIGHT_PHRASES))
+                if can_continue:
+                    self.go(query.message.chat)
+                    bot.edit_message_reply_markup(query.message.chat.id, query.message.id, reply_markup=tb.util.quick_markup(
+                        {query.data: {"callback_data": "Null"}}))
+                else:
+                    sch = sched.scheduler()
+                    sch.enter(1, 1, bot.delete_message, (query.message.chat.id, bot.send_message(
+                        query.message.chat.id, "You unable to select this option. \nPlease select another one!")))
+                    sch.run()
+
+            bot.answer_callback_query(query.id, data)
+        else:
+            # print(query)
+            bot.answer_callback_query(
+                query.id, "You can not press this button. It was already used!", True)
+
+    
+    #endregion
+
+#endregion
+
+# endregion
+
+#region Bot Behavior On Commands
+
+def start_polling():
+    log(21, "Starting infinity pooling")
+    while RUNNING:
+        bot.infinity_polling()
+        log(21, "Restarting!")
+
+
+def check_token(msg: tb.types.Message):
+    log(22, "Tryed token «%s»", msg.text,
+        extra={"user": msg.from_user.full_name})
+    if msg.text in config["authToken"]:
+        log(22, "Success!", extra={"user": msg.from_user.full_name})
+        config["whitelist"].append(msg.from_user.id)
+        config["authToken"].remove(msg.text)
+        bot.send_message(
+            msg.chat.id, text="Auth token correct!\ntype \"/start\" to start")
+    else:
+        log(22, "Deny!", extra={"user": msg.from_user.full_name})
+        bot.send_message(msg.chat.id, text="Uncorrect token")
+        bot.register_next_step_handler_by_chat_id(msg.chat.id, check_token)
+
+
+@bot.message_handler(commands=["start"])
+def say_hello(msg: tb.types.Message):
+    log(22, "Join", extra={"user": msg.from_user.full_name})
+    if not msg.from_user.id in config["whitelist"]:
+        log(22, "Not in whitelist!", f"Id: {msg.from_user.id}; Nickname: \
+            {msg.from_user.username}", extra={"user": msg.from_user.full_name})
+        bot.send_message(msg.chat.id, "This chanel is whitelisted.")
+        bot.send_message(msg.chat.id, "Please enter auth token to continue.")
+        bot.register_next_step_handler_by_chat_id(msg.chat.id, check_token)
+
+    if not msg.from_user.id in config["whitelist"]:
+        return None
+    if not msg.from_user.id in registred_users:
+        registred_users[msg.from_user.id] = StartGame(msg)
+    else:
+        registred_users[msg.from_user.id].go(msg.chat)
+
+#endregion
+
+#region Save && Load
+
+#TODO save only changed users
+def save():
+    global RUNNING
+    RUNNING = False
+    bot.stop_polling()
+    bot.stop_bot()
+    arr = []
+    for key in registred_users.keys():
+        temparr = registred_users[key].to_bytearray()
+        arr.append(bytearray(key.to_bytes(8, "big")))
+        arr.append(temparr[0])
+        arr.append(temparr[1])
+        arr.append(temparr[2])
+        arr.append(temparr[3])
+    with open("D:\\Andrey\\pashaGame.bin", "wb+") as f:
+        f.writelines(list(map(lambda i: i + b"\n", arr)))
+    log(21, "Saved!")
+    log(11, "Save File: %s", str(list(map(lambda i: i + b"\n", arr))))
+    with open("pashaGameConfig.json", "w") as f:
+        json.dump(config, f)
+    root.destroy()
+    try:
+        threading.setprofile(lambda *_: quit())
+    except:
+        threading.setprofile_all_threads(lambda *_: quit())
+
+
+def strip(n: bytes):
+    return n.replace(b"\n", b"")
+
+#TODO Load only on /start
+def load():
+    def wrapper():
+        global registred_users
+        with open("D:\\Andrey\\pashaGame.bin", "rb+") as f:
+            lines = tuple(map(strip, f.readlines()))
+            for i in range(0, len(lines), 5):
+                registred_users[int.from_bytes(lines[i], "big")] = StartGame(
+                    tuple(map(bytearray, (lines[i+1], lines[i+2], lines[i+3], lines[i+4]))))
+        log(21, "Loaded save file")
+        log(11, "Registred users: %s", str(registred_users))
+    threading.Thread(target=wrapper).start()
+
+
+#endregion
+
+registred_users: dict[int, StartGame] = {}
+
+#region UI Loop
+
+def new():
+    log(21, "Starting new")
+    threading.Thread(target=start_polling).start()
+    # tk.Button(text="Are You Sure???",
+    #           command=lambda: ).pack()
+
+
+def ui_loop():
+    while True:
+        root.update()
+
+
+
+root = tk.Tk()
+tk.Button(root, text="New", command=lambda: threading.Thread(
+    target=new).start(), fg="red", font=("", 14)).pack()
+tk.Button(root, text="Load", command=lambda: threading.Thread(
+    target=load).start(), fg="red", font=("", 16)).pack()
+tk.Button(root, text="Save, Stop & Quit",
+          command=save, fg="red", font=("", 14)).pack()
+root.mainloop()
+
+
+#endregion
+
+with open("pashaGameConfig.json", "w") as f:
+    json.dump(config, f, separators=(', \n    ', ': \n    '))
